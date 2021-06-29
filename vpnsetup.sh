@@ -196,7 +196,12 @@ bigecho "Installing Fail2Ban to protect SSH..."
 
 bigecho "Downloading IKEv2 script..."
 
-ikev2_url="https://github.com/hwdsl2/setup-ipsec-vpn/raw/master/extras/ikev2setup.sh"
+repo=wpbrown
+if [ -z "$VPN_REPO_REV" ]; then
+  bigecho "Revision not set by user, using master branch."
+  VPN_REPO_REV=master
+fi
+ikev2_url="https://github.com/$repo/setup-ipsec-vpn/raw/$VPN_REPO_REV/extras/ikev2setup.sh"
 (
   set -x
   wget -t 3 -T 30 -q -O ikev2.sh "$ikev2_url"
@@ -206,6 +211,7 @@ ikev2_url="https://github.com/hwdsl2/setup-ipsec-vpn/raw/master/extras/ikev2setu
 bigecho "Downloading Libreswan..."
 
 SWAN_VER=4.4
+SWAN_HASH=5f3f0a20d7097f20108bc93ba1255a778d8ffb8692d05f86383978c03c394976
 swan_file="libreswan-$SWAN_VER.tar.gz"
 swan_url1="https://github.com/libreswan/libreswan/archive/v$SWAN_VER.tar.gz"
 swan_url2="https://download.libreswan.org/$swan_file"
@@ -213,6 +219,9 @@ swan_url2="https://download.libreswan.org/$swan_file"
   set -x
   wget -t 3 -T 30 -q -O "$swan_file" "$swan_url1" || wget -t 3 -T 30 -q -O "$swan_file" "$swan_url2"
 ) || exit 1
+if ! echo "$SWAN_HASH *$swan_file" | sha256sum -c -; then 
+  exiterr "Libreswan $SWAN_VER source code hash validation failed."
+fi
 /bin/rm -rf "/opt/src/libreswan-$SWAN_VER"
 tar xzf "$swan_file" && /bin/rm -f "$swan_file"
 
@@ -312,6 +321,30 @@ conn xauth-psk
 
 include /etc/ipsec.d/*.conf
 EOF
+
+if [ -n "$VPN_S2S_REMOTE_NET" -a -n "$VPN_S2S_LOCAL_NET" ]; then
+  cat > /etc/ipsec.d/ikev2-s2s-psk.conf <<EOF
+conn ikev2-s2s-psk
+  left=%defaultroute
+  leftsubnet=$VPN_S2S_LOCAL_NET
+  rightsubnet=$VPN_S2S_REMOTE_NET
+  right=%any
+  narrowing=yes
+  dpddelay=30
+  dpdtimeout=120
+  dpdaction=clear
+  auto=add
+  ikev2=insist
+  rekey=no
+  pfs=no
+  ike=aes256-sha2,aes128-sha2,aes256-sha1,aes128-sha1
+  phase2alg=aes_gcm-null,aes128-sha1,aes256-sha1,aes128-sha2,aes256-sha2
+  ikelifetime=24h
+  salifetime=24h
+  leftid=$public_ip
+  authby=secret
+EOF
+fi
 
 if uname -m | grep -qi '^arm'; then
   if ! modprobe -q sha512; then
@@ -433,9 +466,15 @@ if [ "$ipt_flag" = "1" ]; then
   $ipf 5 -i "$NET_IFACE" -d "$XAUTH_NET" -m conntrack --ctstate "$res" -j ACCEPT
   $ipf 6 -s "$XAUTH_NET" -o "$NET_IFACE" -j ACCEPT
   $ipf 7 -s "$XAUTH_NET" -o ppp+ -j ACCEPT
+  if [ -n "$VPN_S2S_REMOTE_NET" ]; then
+    $ipf 8 -i "$NET_IFACE" -d "$VPN_S2S_REMOTE_NET" -m conntrack --ctstate "$res" -j ACCEPT
+    $ipf 9 -s "$VPN_S2S_REMOTE_NET" -o "$NET_IFACE" -j ACCEPT
+  fi
   iptables -A FORWARD -j DROP
-  $ipp -s "$XAUTH_NET" -o "$NET_IFACE" -m policy --dir out --pol none -j MASQUERADE
-  $ipp -s "$L2TP_NET" -o "$NET_IFACE" -j MASQUERADE
+  if [ -z "$VPN_DISABLE_NAT" ]; then
+    $ipp -s "$XAUTH_NET" -o "$NET_IFACE" -m policy --dir out --pol none -j MASQUERADE
+    $ipp -s "$L2TP_NET" -o "$NET_IFACE" -j MASQUERADE
+  fi
   echo "# Modified by hwdsl2 VPN script" > "$IPT_FILE"
   iptables-save >> "$IPT_FILE"
 
@@ -533,6 +572,11 @@ Note: A newer version of Libreswan ($swan_ver_latest) is available.
       To update, run:
       wget https://git.io/vpnupgrade -O vpnup.sh && sudo sh vpnup.sh
 EOF
+fi
+
+if [ -n $VPN_HIDE_SECRETS ]; then
+	VPN_IPSEC_PSK="[REDACTED]"
+	VPN_PASSWORD="[REDACTED]"
 fi
 
 cat <<EOF
