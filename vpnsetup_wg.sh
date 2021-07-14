@@ -11,17 +11,20 @@ set -euo pipefail
 # VPN_LOCAL_IP
 # VPN_LOCAL_PORT
 
+export DEBIAN_FRONTEND=noninteractive
+
 # Enable IP forwarding
 sed -i '/^#\s*net.ipv4.ip_forward\s*=\s*1/s/^#//' /etc/sysctl.conf 
 sysctl -p
 
-# Install updates
-export DEBIAN_FRONTEND=noninteractive
-apt-get update 
-apt-get upgrade -y
+if ! command -v wg; then
+	# Install updates
+	apt-get update 
+	apt-get upgrade -y
 
-# Install wireguard
-apt-get install -y wireguard
+	# Install wireguard
+	apt-get install -y wireguard
+fi
 
 # Configure wireguard
 conf_data="
@@ -39,23 +42,40 @@ AllowedIPs = ${VPN_REMOTE_NET}
 
 echo "$conf_data" > /etc/wireguard/wg0.conf
 
+# Stop existing
+if wg show wg0; then
+	wg-quick down wg0
+fi
+
 # SSH Port
-ssh_port=$(cat /etc/ssh/sshd_config | grep -oP '^\s*Port\s*\K\d+\s*$')
-[ -z "$ssh_port" ] && ssh_port=22
+ssh_port=$(cat /etc/ssh/sshd_config | grep -oP '^\s*Port\s*\K\d+\s*$') && true
+[[ -z $ssh_port ]] && ssh_port=22
 
 # Setup firewall
-iptables -A INPUT -i lo -j ACCEPT
-iptables -A INPUT -p icmp -j ACCEPT
-iptables -A INPUT -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
-iptables -A INPUT -p tcp --dport ${ssh_port} -j ACCEPT # SSH
-iptables -A INPUT -p udp --dport ${VPN_LOCAL_PORT} -j ACCEPT # Wireguard
-iptables -P INPUT DROP
+iptables -N chain-vpnsetup-wg && true
+iptables -F chain-vpnsetup-wg
+iptables -A chain-vpnsetup-wg -p tcp --dport ${ssh_port} -j ACCEPT # SSH
+iptables -A chain-vpnsetup-wg -p udp --dport ${VPN_LOCAL_PORT} -j ACCEPT # Wireguard
+iptables -A chain-vpnsetup-wg -j RETURN
 
-iptables -A FORWARD -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
-iptables -P FORWARD DROP
+if [[ -f "/etc/iptables/rules.v4" ]]; then
+	# Repersist firewall
+	netfilter-persistent save
+else
+	## Input setup
+	iptables -A INPUT -i lo -j ACCEPT
+	iptables -A INPUT -p icmp -j ACCEPT
+	iptables -A INPUT -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
+	iptables -A INPUT -j chain-vpnsetup-wg
+	iptables -P INPUT DROP
 
-# Persist firewall
-apt-get install -y iptables-persistent
+	## Forward setup
+	iptables -A FORWARD -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
+	iptables -P FORWARD DROP
+
+	# Persist firewall
+	apt-get install -y iptables-persistent
+fi
 
 # Start wireguard
 wg-quick up wg0
