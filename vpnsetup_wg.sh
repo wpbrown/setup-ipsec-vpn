@@ -17,13 +17,18 @@ export DEBIAN_FRONTEND=noninteractive
 sed -i '/^#\s*net.ipv4.ip_forward\s*=\s*1/s/^#//' /etc/sysctl.conf 
 sysctl -p
 
+# Install wireguard
+install_tries=10
 if ! command -v wg; then
-	# Install updates
-	apt-get update 
-	apt-get upgrade -y
-
-	# Install wireguard
-	apt-get install -y wireguard
+    for i in $(seq 1 ${install_tries}); do
+        [[ $i -eq ${install_tries} ]] && exit 1
+        apt-get update \
+          && apt-get install -y wireguard \
+          && break \
+          || true
+        echo "Package install failed..."
+        sleep 30
+    done
 fi
 
 # Configure wireguard
@@ -80,3 +85,4 @@ fi
 # Start wireguard
 wg-quick up wg0
 systemctl enable wg-quick@wg0
+
